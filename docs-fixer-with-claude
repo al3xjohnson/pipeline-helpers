@@ -12,7 +12,7 @@ on:
     paths:
       - 'docs/**/*.md'
       - 'CLAUDE.md'
-      - '.github/workflows/docs-check-with-claude.yml'
+      - '.github/workflows/docs-fixer-with-claude.yml'
   push:
     branches:
       - main
