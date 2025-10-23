@@ -1,0 +1,119 @@
+name: Documentation Check with Claude
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: read
+  id-token: write
+
+on:
+  pull_request:
+    paths:
+      - 'docs/**/*.md'
+      - 'CLAUDE.md'
+      - '.github/workflows/docs-check-with-claude.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'docs/**/*.md'
+      - 'CLAUDE.md'
+
+jobs:
+  check-links-with-claude:
+    name: Check Links (Claude Fixes Issues)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check for broken links
+        id: link-check
+        uses: gaurav-nelson/github-action-markdown-link-check@v1
+        continue-on-error: true
+        with:
+          use-quiet-mode: 'no'
+          use-verbose-mode: 'yes'
+          config-file: '.github/markdown-link-check-config.json'
+          check-modified-files-only: 'yes'
+          base-branch: 'main'
+
+      - name: Capture link check output
+        if: steps.link-check.outcome == 'failure'
+        id: capture-output
+        run: |
+          echo "Link check failed. Capturing output for Claude..."
+          # The output is in the previous step's logs, but we can create a summary
+          echo "ERRORS_FOUND=true" >> $GITHUB_OUTPUT
+      
+      - name: Configure Git for commits
+        if: steps.link-check.outcome == 'failure'
+        run: |
+          git config --global user.name "claude-code[bot]"
+          git config --global user.email "claude-code[bot]@users.noreply.github.com"
+
+      - name: Ask Claude to fix broken links
+        if: steps.link-check.outcome == 'failure' && github.event_name == 'pull_request'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            The markdown link check has found broken links in the documentation.
+
+            Look at the "Check for broken links" step output above - it shows exactly which files have broken links and what the errors are.
+
+            Please:
+            1. Read the link check output to identify all broken links
+            2. Fix each broken link in the affected files using the Edit tool
+
+            The link checker output will show lines like:
+            - FILE: path/to/file.md
+            - [✖] http://broken-link.com → Status: 404
+
+            Fix all the broken links you find. After you're done, the workflow will automatically commit and push your changes.
+          claude_args: '--allowed-tools "Edit,Read,Grep,Glob"'
+
+      - name: Commit and push Claude's fixes
+        if: steps.link-check.outcome == 'failure' && github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if git diff --quiet; then
+            echo "No changes to commit"
+          else
+            git add -A
+            git commit -m "fix: correct broken documentation links
+
+            Fixed by Claude Code automation:
+            - Corrected typos in directory paths
+            - Updated broken links to point to correct locations
+
+            Co-authored-by: Claude <noreply@anthropic.com>"
+            # Configure git to use the GitHub token for authentication
+            git config --local credential.helper ""
+            git push https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git HEAD:${{ github.head_ref }}
+            echo "Changes committed and pushed successfully"
+          fi
+
+      - name: Comment on PR with fix summary
+        if: steps.link-check.outcome == 'failure' && github.event_name == 'pull_request'
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} --body "✅ **Claude has fixed broken documentation links**
+
+          The markdown link checker found broken links, and I've automatically corrected them. The changes have been committed to this PR.
+
+          Please review the commit to ensure the fixes are correct."
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Fail workflow if links are broken
+        if: steps.link-check.outcome == 'failure'
+        run: |
+          echo "Documentation link check failed. Claude has been asked to fix the errors in this PR."
+          exit 1
